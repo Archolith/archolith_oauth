@@ -5,6 +5,7 @@ from __future__ import annotations
 import secrets
 import sqlite3
 import time
+from collections.abc import Collection
 from pathlib import Path
 
 from .models import RefreshTokenRecord
@@ -108,14 +109,17 @@ class RefreshTokenStore:
         client_id: str,
         resource: str,
         scope: str | None = None,
+        allowed_scopes: Collection[str] | None = None,
         now: float | None = None,
     ) -> tuple[RefreshTokenRecord, str] | None:
         """Atomically rotate a token, optionally narrowing the family scope.
 
         An omitted or empty ``scope`` preserves the original scope. A scope
-        equal to or a subset of the grant is validated before any mutation:
-        on expansion ``RefreshScopeError`` is raised and the presented token
-        stays valid. On success exactly one narrowed replacement is created.
+        equal to or a subset of the grant is validated before any mutation.
+        When ``allowed_scopes`` is provided, the continued scope must also be
+        inside the authorization server's current policy surface. On either
+        failure ``RefreshScopeError`` is raised and the presented token stays
+        valid. On success exactly one narrowed replacement is created.
         """
         token_hash = hash_secret(token)
         rotated_at = time.time() if now is None else now
@@ -160,6 +164,14 @@ class RefreshTokenStore:
                     )
                 if requested_scopes != original_scopes:
                     continuation_scope = " ".join(sorted(requested_scopes))
+
+            continued_scopes = set(continuation_scope.split())
+            if allowed_scopes is not None and not continued_scopes.issubset(
+                set(allowed_scopes)
+            ):
+                raise RefreshScopeError(
+                    "continued scope is no longer supported by the authorization server"
+                )
 
             cursor = conn.execute(
                 """UPDATE oauth_refresh_tokens SET used_at = ?

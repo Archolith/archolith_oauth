@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import time
+from collections.abc import Collection
 from dataclasses import dataclass
 from typing import Any
 
@@ -96,6 +97,7 @@ def exchange_authorization_code(
     code_verifier: str,
     resource: str,
     refresh_store: RefreshTokenStore | None = None,
+    allowed_scopes: Collection[str] | None = None,
 ) -> TokenResponse:
     """Redeem one authorization code using PKCE and RFC 8707 resource binding."""
     if not resource:
@@ -126,6 +128,11 @@ def exchange_authorization_code(
 
     refresh_token: str | None = None
     scope_set = set(record.scope.split())
+    if allowed_scopes is not None and not scope_set.issubset(set(allowed_scopes)):
+        raise TokenExchangeError(
+            "invalid_grant",
+            "authorization grant contains scope no longer supported",
+        )
     if (
         issuer.config.issue_refresh_tokens
         and issuer.config.offline_access_scope in scope_set
@@ -162,6 +169,7 @@ def exchange_refresh_token(
     client_id: str,
     resource: str,
     scope: str | None = None,
+    allowed_scopes: Collection[str] | None = None,
 ) -> TokenResponse:
     """Rotate a public client's refresh token and mint a new access token.
 
@@ -193,6 +201,7 @@ def exchange_refresh_token(
             client_id=client_id,
             resource=resource,
             scope=scope,
+            allowed_scopes=allowed_scopes,
         )
     except RefreshScopeError as exc:
         raise TokenExchangeError("invalid_scope", exc.description) from exc
