@@ -39,6 +39,29 @@ def test_metadata_defaults():
     assert authorization_server_metadata(auth)["grant_types_supported"] == [
         "authorization_code"
     ]
+    assert (
+        authorization_server_metadata(auth)[
+            "authorization_response_iss_parameter_supported"
+        ]
+        is False
+    )
+    assert (
+        authorization_server_metadata(auth)["client_id_metadata_document_supported"]
+        is False
+    )
+
+
+def test_rfc9207_and_cimd_metadata_flags_are_truthful():
+    auth = AuthorizationServerConfig(
+        issuer="https://auth.example.com/",
+        resource="https://service.example.com/mcp",
+        scopes_supported=("service:read",),
+        authorization_response_iss_parameter_supported=True,
+        client_id_metadata_document_supported=True,
+    )
+    metadata = authorization_server_metadata(auth)
+    assert metadata["authorization_response_iss_parameter_supported"] is True
+    assert metadata["client_id_metadata_document_supported"] is True
 
     resource = ResourceServerConfig(
         resource=auth.resource,

@@ -30,4 +30,10 @@ def authorization_server_metadata(config: AuthorizationServerConfig) -> dict[str
         "token_endpoint_auth_methods_supported": ["none"],
         "scopes_supported": list(config.effective_scopes_supported),
         "protected_resources": [config.resource],
+        "authorization_response_iss_parameter_supported": (
+            config.authorization_response_iss_parameter_supported
+        ),
+        "client_id_metadata_document_supported": (
+            config.client_id_metadata_document_supported
+        ),
     }

@@ -11,6 +11,14 @@ from .models import RefreshTokenRecord
 from .stores import hash_secret
 
 
+class RefreshScopeError(ValueError):
+    """Requested refresh scope exceeds the grant recorded for the family."""
+
+    def __init__(self, description: str) -> None:
+        super().__init__(description)
+        self.description = description
+
+
 def _connect(path: Path) -> sqlite3.Connection:
     return sqlite3.connect(path, timeout=30.0)
 
@@ -99,12 +107,24 @@ class RefreshTokenStore:
         token: str,
         client_id: str,
         resource: str,
+        scope: str | None = None,
         now: float | None = None,
     ) -> tuple[RefreshTokenRecord, str] | None:
+        """Atomically rotate a token, optionally narrowing the family scope.
+
+        An omitted or empty ``scope`` preserves the original scope. A scope
+        equal to or a subset of the grant is validated before any mutation:
+        on expansion ``RefreshScopeError`` is raised and the presented token
+        stays valid. On success exactly one narrowed replacement is created.
+        """
         token_hash = hash_secret(token)
         rotated_at = time.time() if now is None else now
         replacement = secrets.token_urlsafe(48)
         replacement_hash = hash_secret(replacement)
+
+        requested_scopes: set[str] | None = None
+        if scope is not None and scope.strip():
+            requested_scopes = set(scope.split())
 
         with _connect(self.db_path) as conn:
             conn.row_factory = sqlite3.Row
@@ -131,6 +151,16 @@ class RefreshTokenStore:
                 )
                 return None
 
+            original_scopes = set(str(row["scope"]).split())
+            continuation_scope = str(row["scope"])
+            if requested_scopes is not None:
+                if not requested_scopes.issubset(original_scopes):
+                    raise RefreshScopeError(
+                        "requested scope exceeds the originally granted scope"
+                    )
+                if requested_scopes != original_scopes:
+                    continuation_scope = " ".join(sorted(requested_scopes))
+
             cursor = conn.execute(
                 """UPDATE oauth_refresh_tokens SET used_at = ?
                    WHERE token_hash = ? AND used_at IS NULL AND revoked_at IS NULL
@@ -155,7 +185,7 @@ class RefreshTokenStore:
                     row["family_id"],
                     row["client_id"],
                     row["subject"],
-                    row["scope"],
+                    continuation_scope,
                     row["resource"],
                     rotated_at,
                     rotated_at + self.ttl_s,

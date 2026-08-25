@@ -1,6 +1,7 @@
 """Reusable OAuth 2.1 building blocks for Archolith services."""
 
 from .config import AuthorizationServerConfig, ResourceServerConfig, well_known_url
+from .cimd import resolve_client_metadata_document
 from .consent import (
     ConsentNonceStore,
     ConsentSession,
@@ -24,6 +25,7 @@ from .registration import (
     ClientMetadataError,
     register_public_client,
     register_public_client_for_server,
+    valid_redirect_uri,
     validate_authorization_request,
 )
 from .runtime import OAuthRuntime
@@ -77,6 +79,8 @@ __all__ = [
     "protected_resource_metadata",
     "register_public_client",
     "register_public_client_for_server",
+    "valid_redirect_uri",
+    "resolve_client_metadata_document",
     "s256_challenge",
     "validate_authorization_request",
     "verify_s256",

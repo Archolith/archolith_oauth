@@ -10,7 +10,7 @@ from . import jose
 from .config import AuthorizationServerConfig
 from .models import OAuthClient
 from .pkce import verify_s256
-from .refresh_tokens import RefreshTokenStore
+from .refresh_tokens import RefreshScopeError, RefreshTokenStore
 from .stores import AuthorizationCodeStore, OAuthClientStore
 
 
@@ -161,8 +161,16 @@ def exchange_refresh_token(
     refresh_token: str,
     client_id: str,
     resource: str,
+    scope: str | None = None,
 ) -> TokenResponse:
-    """Rotate a public client's refresh token and mint a new access token."""
+    """Rotate a public client's refresh token and mint a new access token.
+
+    An omitted or empty ``scope`` preserves the original grant scope. A
+    requested scope must be equal to or a subset of the grant scope; the
+    rotated replacement carries the narrowed scope. Scope expansion fails
+    with ``invalid_scope`` before any mutation, leaving the presented token
+    usable.
+    """
     if not issuer.config.issue_refresh_tokens:
         raise TokenExchangeError(
             "unsupported_grant_type",
@@ -179,21 +187,32 @@ def exchange_refresh_token(
     if client is None:
         raise TokenExchangeError("invalid_grant", "registered client no longer exists")
 
-    rotated = refresh_store.rotate(
-        token=refresh_token,
-        client_id=client_id,
-        resource=resource,
-    )
+    try:
+        rotated = refresh_store.rotate(
+            token=refresh_token,
+            client_id=client_id,
+            resource=resource,
+            scope=scope,
+        )
+    except RefreshScopeError as exc:
+        raise TokenExchangeError("invalid_scope", exc.description) from exc
     if rotated is None:
         raise TokenExchangeError(
             "invalid_grant",
             "refresh token is invalid, expired, replayed, or revoked",
         )
     record, replacement = rotated
+
+    issued_scope = record.scope
+    if scope is not None and scope.strip():
+        requested_scopes = set(scope.split())
+        if requested_scopes != set(record.scope.split()):
+            issued_scope = " ".join(sorted(requested_scopes))
+
     return issuer.issue(
         subject=record.subject,
         client=client,
-        scope=record.scope,
+        scope=issued_scope,
         resource=record.resource,
         refresh_token=replacement,
     )
