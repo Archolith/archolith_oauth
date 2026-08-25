@@ -128,6 +128,81 @@ async def test_authorization_code_issues_rotating_refresh_token(tmp_path: Path):
         )
 
 
+def test_explicit_policy_can_issue_refresh_without_offline_access(tmp_path: Path):
+    pytest.importorskip("joserfc")
+
+    resource = "https://harness.example.com/mcp"
+    config = AuthorizationServerConfig(
+        issuer="https://auth.example.com/harness",
+        resource=resource,
+        scopes_supported=("harness:read",),
+        issue_refresh_tokens=True,
+    )
+    client = register_public_client(
+        {
+            "redirect_uris": ["https://chat.example.com/callback"],
+            "grant_types": ["authorization_code", "refresh_token"],
+            "scope": "harness:read",
+        },
+        supported_scopes=config.effective_scopes_supported,
+        allow_refresh_tokens=True,
+    )
+    db = tmp_path / "oauth.db"
+    clients = OAuthClientStore(db)
+    codes = AuthorizationCodeStore(db)
+    refreshes = RefreshTokenStore(db, ttl_s=config.refresh_token_ttl_s)
+    clients.register(client)
+    verifier_text = "v" * 64
+    grant = validate_authorization_request(
+        client=client,
+        response_type="code",
+        redirect_uri=client.redirect_uris[0],
+        requested_scope="harness:read",
+        code_challenge=s256_challenge(verifier_text),
+        code_challenge_method="S256",
+        resource=resource,
+        expected_resource=resource,
+        subject="user-1",
+    )
+    code_without_policy = codes.issue(grant)
+    without_policy = exchange_authorization_code(
+        code_store=codes,
+        client_store=clients,
+        refresh_store=refreshes,
+        issuer=TokenIssuer(
+            config,
+            SigningKeyStore(tmp_path / "signing-key.json").load_or_create(),
+        ),
+        code=code_without_policy,
+        client_id=client.client_id,
+        redirect_uri=client.redirect_uris[0],
+        code_verifier=verifier_text,
+        resource=resource,
+    )
+    assert without_policy.refresh_token is None
+
+    code = codes.issue(grant)
+
+    response = exchange_authorization_code(
+        code_store=codes,
+        client_store=clients,
+        refresh_store=refreshes,
+        issuer=TokenIssuer(
+            config,
+            SigningKeyStore(tmp_path / "signing-key.json").load_or_create(),
+        ),
+        code=code,
+        client_id=client.client_id,
+        redirect_uri=client.redirect_uris[0],
+        code_verifier=verifier_text,
+        resource=resource,
+        issue_refresh_without_offline_access=True,
+    )
+
+    assert response.refresh_token
+    assert response.scope == "harness:read"
+
+
 def _harness(tmp_path: Path):
     pytest.importorskip("joserfc")
 

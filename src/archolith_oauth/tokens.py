@@ -98,8 +98,15 @@ def exchange_authorization_code(
     resource: str,
     refresh_store: RefreshTokenStore | None = None,
     allowed_scopes: Collection[str] | None = None,
+    issue_refresh_without_offline_access: bool = False,
 ) -> TokenResponse:
-    """Redeem one authorization code using PKCE and RFC 8707 resource binding."""
+    """Redeem one authorization code using PKCE and RFC 8707 resource binding.
+
+    ``issue_refresh_without_offline_access`` is an explicit authorization-server
+    policy seam for clients that do not request the conventional durable-access
+    scope. It remains off by default and never adds ``offline_access`` to the
+    granted permission scope.
+    """
     if not resource:
         raise TokenExchangeError("invalid_request", "resource is required")
     record = code_store.redeem(
@@ -135,7 +142,10 @@ def exchange_authorization_code(
         )
     if (
         issuer.config.issue_refresh_tokens
-        and issuer.config.offline_access_scope in scope_set
+        and (
+            issuer.config.offline_access_scope in scope_set
+            or issue_refresh_without_offline_access
+        )
     ):
         if refresh_store is None:
             raise TokenExchangeError(
