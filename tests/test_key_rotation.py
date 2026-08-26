@@ -42,6 +42,34 @@ def test_rotation_preserves_legacy_active_file_and_keeps_only_public_history(tmp
     assert old_kid not in store.key_ids()
 
 
+def test_readonly_load_refuses_missing_key_without_creating_state(tmp_path):
+    store = SigningKeyStore(tmp_path / "missing" / "oauth-signing-key.json")
+
+    with pytest.raises(FileNotFoundError, match="signing key does not exist"):
+        store.load_existing()
+
+    assert not store.path.parent.exists()
+
+
+def test_readonly_jwks_does_not_chmod_or_create_files(tmp_path, monkeypatch):
+    store = SigningKeyStore(tmp_path / "oauth-signing-key.json")
+    store.load_or_create()
+    expected_kid = json.loads(store.path.read_text("utf-8"))["kid"]
+    before = set(tmp_path.iterdir())
+
+    monkeypatch.setattr(
+        "archolith_oauth.key_store.os.chmod",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("read-only load attempted chmod")
+        ),
+    )
+
+    jwks = store.public_jwks_existing()
+
+    assert jwks["keys"][0]["kid"] == expected_kid
+    assert set(tmp_path.iterdir()) == before
+
+
 @pytest.mark.asyncio
 async def test_runtime_verifies_tokens_across_one_rotation(tmp_path):
     runtime = OAuthRuntime.from_settings(_settings(tmp_path))

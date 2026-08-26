@@ -4,13 +4,14 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "archolith-oauth"
-version = "0.2.0"
+version = "0.3.0"
 description = "Reusable OAuth 2.1 building blocks for Archolith services and remote MCP resources."
 readme = "README.md"
 license = "Apache-2.0"
 requires-python = ">=3.11"
 authors = [{ name = "Charles Harvey" }]
 dependencies = [
+  "cryptography>=43,<47",
   "httpx>=0.27,<1",
   "joserfc>=1.0,<2",
 ]

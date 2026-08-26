@@ -34,6 +34,9 @@ class SigningKeyStore:
             os.chmod(self.path, 0o600)
         except OSError:
             pass
+        return self._read_existing()
+
+    def _read_existing(self):
         return jose.load_key(json.loads(self.path.read_text("utf-8")))
 
     @staticmethod
@@ -120,6 +123,12 @@ class SigningKeyStore:
         finally:
             self._release_lock(lock_fd)
 
+    def load_existing(self):
+        """Load the active key without creating files or changing metadata."""
+        if not self.path.is_file():
+            raise FileNotFoundError(f"signing key does not exist: {self.path}")
+        return self._read_existing()
+
     def rotate(self, *, retain_previous: int = 1):
         """Create a new active key and retain up to N previous public keys.
 
@@ -173,6 +182,17 @@ class SigningKeyStore:
 
     def public_jwks_all(self) -> dict[str, list[dict[str, Any]]]:
         active = self._public_jwk(self.load_or_create())
+        return self._public_jwks_with_active(active)
+
+    def public_jwks_existing(self) -> dict[str, list[dict[str, Any]]]:
+        """Return the existing keyset without creating or chmodding key files."""
+        active = self._public_jwk(self.load_existing())
+        return self._public_jwks_with_active(active)
+
+    def _public_jwks_with_active(
+        self,
+        active: dict[str, Any],
+    ) -> dict[str, list[dict[str, Any]]]:
         keys = [active, *self._load_previous_public_keys()]
         deduplicated: list[dict[str, Any]] = []
         seen_kids: set[str] = set()

@@ -9,10 +9,14 @@ from typing import Any
 
 from . import jose
 from .config import AuthorizationServerConfig
-from .models import OAuthClient
+from .models import OAuthClient, RefreshTokenRecord
 from .pkce import verify_s256
 from .refresh_tokens import RefreshScopeError, RefreshTokenStore
-from .stores import AuthorizationCodeStore, OAuthClientStore
+from .stores import (
+    AuthorizationCodeStore,
+    OAuthClientStore,
+    ReceiptEncryptionKeyring,
+)
 
 
 class TokenExchangeError(ValueError):
@@ -235,3 +239,74 @@ def exchange_refresh_token(
         resource=record.resource,
         refresh_token=replacement,
     )
+
+
+def exchange_refresh_token_durable(
+    *,
+    refresh_store: RefreshTokenStore,
+    client_store: OAuthClientStore,
+    issuer: TokenIssuer,
+    keyring: ReceiptEncryptionKeyring,
+    refresh_token: str,
+    client_id: str,
+    resource: str,
+    scope: str | None = None,
+    allowed_scopes: Collection[str] | None = None,
+) -> TokenResponse:
+    """Rotate a refresh token and persist a durable exact-response receipt.
+
+    Behaves like :func:`exchange_refresh_token`, except the rotation and a
+    durable retry receipt are committed atomically and the access/refresh
+    response is signed inside that transaction. A retry of the exact request
+    within the receipt grace period returns the identical ``TokenResponse``
+    rather than revoking the family; a variant or post-grace retry fails with
+    ``invalid_grant`` and revokes the family.
+    """
+    if not issuer.config.issue_refresh_tokens:
+        raise TokenExchangeError(
+            "unsupported_grant_type",
+            "refresh_token grant is not enabled",
+        )
+    if not refresh_token or not client_id or not resource:
+        raise TokenExchangeError(
+            "invalid_request",
+            "refresh_token, client_id, and resource are required",
+        )
+    if resource != issuer.config.resource:
+        raise TokenExchangeError("invalid_grant", "resource does not match")
+    client = client_store.get(client_id)
+    if client is None:
+        raise TokenExchangeError("invalid_grant", "registered client no longer exists")
+
+    def sign_response(record: RefreshTokenRecord, replacement: str) -> dict[str, Any]:
+        issued_scope = record.scope
+        if scope is not None and scope.strip():
+            requested_scopes = set(scope.split())
+            if requested_scopes != set(record.scope.split()):
+                issued_scope = " ".join(sorted(requested_scopes))
+        return issuer.issue(
+            subject=record.subject,
+            client=client,
+            scope=issued_scope,
+            resource=record.resource,
+            refresh_token=replacement,
+        ).as_dict()
+
+    try:
+        result = refresh_store.rotate_durable(
+            token=refresh_token,
+            client_id=client_id,
+            resource=resource,
+            scope=scope,
+            allowed_scopes=allowed_scopes,
+            keyring=keyring,
+            sign_response=sign_response,
+        )
+    except RefreshScopeError as exc:
+        raise TokenExchangeError("invalid_scope", exc.description) from exc
+    if result is None:
+        raise TokenExchangeError(
+            "invalid_grant",
+            "refresh token is invalid, expired, replayed, or revoked",
+        )
+    return TokenResponse(**result.response)

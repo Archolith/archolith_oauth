@@ -20,7 +20,7 @@ from .models import (
 )
 from .pkce import create_verifier, s256_challenge, verify_s256
 from .policy import ScopePolicy, ScopePolicyError, ScopeRequirement
-from .refresh_tokens import RefreshTokenStore
+from .refresh_tokens import DurableRotationResult, RefreshTokenStore
 from .registration import (
     ClientMetadataError,
     register_public_client,
@@ -30,13 +30,21 @@ from .registration import (
 )
 from .runtime import OAuthRuntime
 from .settings import OAuthSettings, PreflightCheck, PreflightReport
-from .stores import AuthorizationCodeStore, OAuthClientStore, hash_secret
+from .stores import (
+    AuthorizationCodeStore,
+    OAuthClientStore,
+    ReceiptCryptoError,
+    ReceiptEncryptionKeyring,
+    consent_request_digest,
+    hash_secret,
+)
 from .tokens import (
     TokenExchangeError,
     TokenIssuer,
     TokenResponse,
     exchange_authorization_code,
     exchange_refresh_token,
+    exchange_refresh_token_durable,
 )
 from .verifier import AccessTokenVerifier, OAuthAuthenticationError, extract_scopes
 
@@ -52,6 +60,7 @@ __all__ = [
     "ConsentTokenError",
     "ConsentTokenManager",
     "ConsentTransaction",
+    "DurableRotationResult",
     "OAuthAuthenticationError",
     "OAuthClient",
     "OAuthClientStore",
@@ -60,6 +69,8 @@ __all__ = [
     "OAuthSettings",
     "PreflightCheck",
     "PreflightReport",
+    "ReceiptCryptoError",
+    "ReceiptEncryptionKeyring",
     "RefreshTokenRecord",
     "RefreshTokenStore",
     "ResourceServerConfig",
@@ -71,9 +82,11 @@ __all__ = [
     "TokenIssuer",
     "TokenResponse",
     "authorization_server_metadata",
+    "consent_request_digest",
     "create_verifier",
     "exchange_authorization_code",
     "exchange_refresh_token",
+    "exchange_refresh_token_durable",
     "extract_scopes",
     "hash_secret",
     "protected_resource_metadata",
@@ -87,4 +100,4 @@ __all__ = [
     "well_known_url",
 ]
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
