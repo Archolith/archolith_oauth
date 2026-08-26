@@ -359,6 +359,7 @@ def test_consent_nonce_register_and_code_issue_are_durable_and_atomic(tmp_path) 
     digest = _grant_digest(grant, "state-1")
     assert store.register_consent_nonce(
         jti="jti-1",
+        client_id=CLIENT_ID,
         request_digest=digest,
         expires_at=200,
         now=100,
@@ -386,6 +387,7 @@ def test_consent_variant_expiry_and_denial_fail_closed(tmp_path) -> None:
     digest = _grant_digest(grant, "state-1")
     assert store.register_consent_nonce(
         jti="denied",
+        client_id=CLIENT_ID,
         request_digest=digest,
         expires_at=200,
         now=100,
@@ -404,6 +406,7 @@ def test_consent_variant_expiry_and_denial_fail_closed(tmp_path) -> None:
 
     assert store.register_consent_nonce(
         jti="variant",
+        client_id=CLIENT_ID,
         request_digest=digest,
         expires_at=200,
         now=100,
@@ -428,6 +431,7 @@ def test_concurrent_consent_approval_issues_exactly_one_code(tmp_path) -> None:
     grant = _grant()
     assert store.register_consent_nonce(
         jti="concurrent",
+        client_id=CLIENT_ID,
         request_digest=_grant_digest(grant, "state-1"),
         expires_at=200,
         now=100,
@@ -447,3 +451,163 @@ def test_concurrent_consent_approval_issues_exactly_one_code(tmp_path) -> None:
     assert sum(code is not None for code in codes) == 1
     with sqlite3.connect(db_path) as conn:
         assert conn.execute("SELECT COUNT(*) FROM oauth_codes").fetchone()[0] == 1
+
+
+def _consent_reg_rows(db_path) -> int:
+    with sqlite3.connect(db_path) as conn:
+        return int(
+            conn.execute("SELECT COUNT(*) FROM oauth_consent_nonce_regs").fetchone()[0]
+        )
+
+
+def _consent_spent_rows(db_path) -> int:
+    with sqlite3.connect(db_path) as conn:
+        return int(
+            conn.execute("SELECT COUNT(*) FROM oauth_consent_nonces").fetchone()[0]
+        )
+
+
+def test_consent_bounds_are_validated(tmp_path) -> None:
+    with pytest.raises(ValueError, match="positive"):
+        AuthorizationCodeStore(tmp_path / "oauth.db", consent_global_limit=0)
+    with pytest.raises(ValueError, match="operator bound"):
+        AuthorizationCodeStore(
+            tmp_path / "oauth.db",
+            consent_per_client_limit=100_001,
+        )
+
+
+def test_consent_global_cap_rejects_without_partial_write(tmp_path) -> None:
+    store = AuthorizationCodeStore(tmp_path / "oauth.db", consent_global_limit=2)
+    for i in range(2):
+        assert store.register_consent_nonce(
+            jti=f"j{i}",
+            client_id="c",
+            request_digest="d",
+            expires_at=200,
+            now=100,
+        )
+    assert _consent_reg_rows(store.db_path) == 2
+
+    assert (
+        store.register_consent_nonce(
+            jti="j2",
+            client_id="c",
+            request_digest="d",
+            expires_at=200,
+            now=100,
+        )
+        is False
+    )
+    assert _consent_reg_rows(store.db_path) == 2
+
+
+def test_consent_per_client_cap_isolates_clients(tmp_path) -> None:
+    store = AuthorizationCodeStore(
+        tmp_path / "oauth.db",
+        consent_global_limit=10,
+        consent_per_client_limit=2,
+    )
+    assert store.register_consent_nonce(
+        jti="a0", client_id="a", request_digest="d", expires_at=200, now=100
+    )
+    assert store.register_consent_nonce(
+        jti="a1", client_id="a", request_digest="d", expires_at=200, now=100
+    )
+    assert (
+        store.register_consent_nonce(
+            jti="a2", client_id="a", request_digest="d", expires_at=200, now=100
+        )
+        is False
+    )
+    assert store.register_consent_nonce(
+        jti="b0", client_id="b", request_digest="d", expires_at=200, now=100
+    )
+
+
+def test_consent_spent_rows_kept_until_replay_window_then_purged(tmp_path) -> None:
+    store = AuthorizationCodeStore(tmp_path / "oauth.db")
+    assert store.register_consent_nonce(
+        jti="j", client_id="c", request_digest="d", expires_at=200, now=100
+    )
+    assert store.consume_consent_nonce(jti="j", request_digest="d", now=110)
+
+    assert _consent_spent_rows(store.db_path) == 1
+    assert _consent_reg_rows(store.db_path) == 1
+
+    store.purge_expired(now=150)
+    assert _consent_reg_rows(store.db_path) == 1
+    assert _consent_spent_rows(store.db_path) == 1
+
+    store.purge_expired(now=250)
+    assert _consent_reg_rows(store.db_path) == 0
+    assert _consent_spent_rows(store.db_path) == 0
+
+
+def test_consent_registration_purges_expired_before_insert(tmp_path) -> None:
+    store = AuthorizationCodeStore(tmp_path / "oauth.db", consent_global_limit=1)
+    assert store.register_consent_nonce(
+        jti="j0", client_id="c", request_digest="d", expires_at=120, now=100
+    )
+    assert _consent_reg_rows(store.db_path) == 1
+
+    assert store.register_consent_nonce(
+        jti="j1", client_id="c", request_digest="d", expires_at=200, now=150
+    )
+    assert _consent_reg_rows(store.db_path) == 1
+    with sqlite3.connect(store.db_path) as conn:
+        assert conn.execute(
+            "SELECT jti FROM oauth_consent_nonce_regs"
+        ).fetchone()[0] == "j1"
+
+
+def test_consent_restart_preserves_spent_state_and_bounds(tmp_path) -> None:
+    db_path = tmp_path / "oauth.db"
+    grant = _grant()
+    digest = _grant_digest(grant, "state-1")
+    store = AuthorizationCodeStore(db_path, consent_global_limit=1)
+    assert store.register_consent_nonce(
+        jti="j", client_id=CLIENT_ID, request_digest=digest, expires_at=200, now=100
+    )
+    assert store.consume_consent_nonce(jti="j", request_digest=digest, now=110)
+
+    restarted = AuthorizationCodeStore(db_path, consent_global_limit=1)
+    assert (
+        restarted.issue_with_consent_nonce(grant, jti="j", state="state-1", now=120)
+        is None
+    )
+    assert (
+        restarted.register_consent_nonce(
+            jti="j2",
+            client_id=CLIENT_ID,
+            request_digest=digest,
+            expires_at=200,
+            now=120,
+        )
+        is False
+    )
+
+
+def test_concurrent_consent_registration_never_exceeds_cap(tmp_path) -> None:
+    db_path = tmp_path / "oauth.db"
+    limit = 5
+    AuthorizationCodeStore(
+        db_path, consent_per_client_limit=limit, consent_global_limit=100
+    )
+
+    def register(i: int) -> bool:
+        return AuthorizationCodeStore(
+            db_path, consent_per_client_limit=limit, consent_global_limit=100
+        ).register_consent_nonce(
+            jti=f"j{i}",
+            client_id="c",
+            request_digest="d",
+            expires_at=200,
+            now=100,
+        )
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        results = list(pool.map(register, range(20)))
+
+    assert sum(results) == limit
+    assert _consent_reg_rows(db_path) == limit

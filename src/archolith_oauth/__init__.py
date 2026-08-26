@@ -100,4 +100,4 @@ __all__ = [
     "well_known_url",
 ]
 
-__version__ = "0.3.0"
+__version__ = "0.3.1"

@@ -357,16 +357,42 @@ class AuthorizationCodeStore:
     _CONSENT_SCHEMA_VERSION = 1
     _CONSENT_REG_COLUMNS = {
         "jti",
+        "client_id",
         "request_digest",
         "expires_at",
         "consumed_at",
     }
     _CONSENT_SPENT_COLUMNS = {"jti", "consumed_at", "expires_at"}
+    _CONSENT_GLOBAL_LIMIT_DEFAULT = 4096
+    _CONSENT_PER_CLIENT_LIMIT_DEFAULT = 256
+    _CONSENT_GLOBAL_LIMIT_MAX = 1_000_000
+    _CONSENT_PER_CLIENT_LIMIT_MAX = 100_000
 
-    def __init__(self, db_path: Path, *, ttl_s: float = 120.0) -> None:
+    def __init__(
+        self,
+        db_path: Path,
+        *,
+        ttl_s: float = 120.0,
+        consent_global_limit: int = _CONSENT_GLOBAL_LIMIT_DEFAULT,
+        consent_per_client_limit: int = _CONSENT_PER_CLIENT_LIMIT_DEFAULT,
+    ) -> None:
         self.db_path = Path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self.ttl_s = float(ttl_s)
+        self.consent_global_limit = int(consent_global_limit)
+        self.consent_per_client_limit = int(consent_per_client_limit)
+        if self.consent_global_limit <= 0 or self.consent_per_client_limit <= 0:
+            raise ValueError("consent bounds must be positive integers")
+        if self.consent_global_limit > self._CONSENT_GLOBAL_LIMIT_MAX:
+            raise ValueError(
+                "consent_global_limit exceeds the operator bound "
+                f"{self._CONSENT_GLOBAL_LIMIT_MAX}"
+            )
+        if self.consent_per_client_limit > self._CONSENT_PER_CLIENT_LIMIT_MAX:
+            raise ValueError(
+                "consent_per_client_limit exceeds the operator bound "
+                f"{self._CONSENT_PER_CLIENT_LIMIT_MAX}"
+            )
         self._lock = threading.Lock()
         with _connect(self.db_path) as conn:
             consent_version = _component_schema_version(
@@ -399,6 +425,7 @@ class AuthorizationCodeStore:
             conn.execute(
                 """CREATE TABLE IF NOT EXISTS oauth_consent_nonce_regs (
                     jti TEXT PRIMARY KEY,
+                    client_id TEXT NOT NULL,
                     request_digest TEXT NOT NULL,
                     expires_at REAL NOT NULL,
                     consumed_at REAL
@@ -408,6 +435,15 @@ class AuthorizationCodeStore:
                 str(row[1])
                 for row in conn.execute("PRAGMA table_info(oauth_consent_nonce_regs)")
             }
+            if "client_id" not in reg_columns:
+                conn.execute(
+                    "ALTER TABLE oauth_consent_nonce_regs "
+                    "ADD COLUMN client_id TEXT NOT NULL DEFAULT ''"
+                )
+                reg_columns = {
+                    str(row[1])
+                    for row in conn.execute("PRAGMA table_info(oauth_consent_nonce_regs)")
+                }
             spent_columns = {
                 str(row[1])
                 for row in conn.execute("PRAGMA table_info(oauth_consent_nonces)")
@@ -420,6 +456,14 @@ class AuthorizationCodeStore:
                 raise ValueError(
                     "oauth_consent_nonces schema is incompatible with this package version"
                 )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_oauth_consent_nonce_regs_client "
+                "ON oauth_consent_nonce_regs(client_id)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_oauth_consent_nonce_regs_expires "
+                "ON oauth_consent_nonce_regs(expires_at)"
+            )
             if consent_version is None:
                 _record_component_schema(
                     conn,
@@ -489,10 +533,22 @@ class AuthorizationCodeStore:
             )
         return raw
 
+    def _purge_consent_expired(self, conn: sqlite3.Connection, now: float) -> None:
+        """Delete consent rows only once their replay window has fully elapsed."""
+        conn.execute(
+            "DELETE FROM oauth_consent_nonce_regs WHERE expires_at <= ?",
+            (now,),
+        )
+        conn.execute(
+            "DELETE FROM oauth_consent_nonces WHERE expires_at <= ?",
+            (now,),
+        )
+
     def register_consent_nonce(
         self,
         *,
         jti: str,
+        client_id: str,
         expires_at: float,
         request_digest: str,
         now: float | None = None,
@@ -501,11 +557,16 @@ class AuthorizationCodeStore:
 
         The JTI must already have been minted by the consent token manager; this
         records its unspent state so a later ``consume_consent_nonce`` or
-        ``issue_with_consent_nonce`` can transition it exactly once. Returns
-        ``False`` when the JTI is missing, malformed, expired, or already
-        registered.
+        ``issue_with_consent_nonce`` can transition it exactly once. Expired
+        registrations and spent nonce rows are purged first (only after their
+        replay window), then hard global and per-client bounds are enforced in
+        the same transaction before the insert, so a refusal writes nothing.
+        Returns ``False`` when the JTI or client is missing/malformed, the nonce
+        is expired, the bounds are exhausted, or the JTI is already registered.
         """
         if not isinstance(jti, str) or not jti:
+            return False
+        if not isinstance(client_id, str) or not client_id:
             return False
         if not isinstance(expires_at, (int, float)):
             return False
@@ -514,12 +575,28 @@ class AuthorizationCodeStore:
             return False
         with _connect(self.db_path) as conn:
             conn.execute("BEGIN IMMEDIATE")
+            self._purge_consent_expired(conn, current)
+            global_count = conn.execute(
+                "SELECT COUNT(*) FROM oauth_consent_nonce_regs WHERE expires_at > ?",
+                (current,),
+            ).fetchone()[0]
+            per_client_count = conn.execute(
+                "SELECT COUNT(*) FROM oauth_consent_nonce_regs "
+                "WHERE client_id = ? AND expires_at > ?",
+                (client_id, current),
+            ).fetchone()[0]
+            if (
+                global_count >= self.consent_global_limit
+                or per_client_count >= self.consent_per_client_limit
+            ):
+                conn.rollback()
+                return False
             try:
                 conn.execute(
                     """INSERT INTO oauth_consent_nonce_regs
-                       (jti, request_digest, expires_at, consumed_at)
-                       VALUES (?, ?, ?, NULL)""",
-                    (jti, request_digest, expires_at),
+                       (jti, client_id, request_digest, expires_at, consumed_at)
+                       VALUES (?, ?, ?, ?, NULL)""",
+                    (jti, client_id, request_digest, expires_at),
                 )
             except sqlite3.IntegrityError:
                 conn.rollback()
@@ -725,8 +802,5 @@ class AuthorizationCodeStore:
                 "WHERE expires_at <= ? OR redeemed_at IS NOT NULL",
                 (cutoff,),
             )
-            conn.execute(
-                "DELETE FROM oauth_consent_nonce_regs WHERE expires_at <= ?",
-                (cutoff,),
-            )
+            self._purge_consent_expired(conn, cutoff)
             return int(cursor.rowcount)
