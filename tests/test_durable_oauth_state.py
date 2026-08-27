@@ -61,6 +61,31 @@ def _family_id(db_path, token: str) -> str:
         )
 
 
+def test_durable_scope_policy_refusal_precedes_all_mutation(tmp_path) -> None:
+    store, original = _refresh_store(tmp_path)
+    with pytest.raises(ValueError, match="current client scope policy"):
+        store.rotate_durable(
+            token=original,
+            client_id=CLIENT_ID,
+            resource=RESOURCE,
+            keyring=_keyring(),
+            sign_response=_response,
+            required_scopes={"menhir:read"},
+            now=110,
+        )
+
+    accepted = store.rotate_durable(
+        token=original,
+        client_id=CLIENT_ID,
+        resource=RESOURCE,
+        keyring=_keyring(),
+        sign_response=_response,
+        required_scopes={"menhir:read", "menhir:write"},
+        now=111,
+    )
+    assert accepted is not None and not accepted.replayed
+
+
 def test_exact_retry_survives_store_restart_and_is_identical(tmp_path) -> None:
     store, original = _refresh_store(tmp_path)
     first = store.rotate_durable(

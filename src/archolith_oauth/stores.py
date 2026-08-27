@@ -15,9 +15,8 @@ import secrets
 import sqlite3
 import threading
 import time
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from pathlib import Path
-from typing import Any
 
 from .models import AuthCodeRecord, AuthorizationGrant, OAuthClient
 
@@ -758,12 +757,38 @@ class AuthorizationCodeStore:
         code: str,
         client_id: str,
         redirect_uri: str,
+        validate: Callable[[AuthCodeRecord], None] | None = None,
     ) -> AuthCodeRecord | None:
         now = time.time()
         code_hash = hash_secret(code)
         with _connect(self.db_path) as conn:
             conn.row_factory = sqlite3.Row
             conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                """SELECT * FROM oauth_codes
+                   WHERE code_hash = ? AND redeemed_at IS NULL AND expires_at > ?""",
+                (code_hash, now),
+            ).fetchone()
+            if (
+                row is None
+                or row["client_id"] != client_id
+                or row["redirect_uri"] != redirect_uri
+            ):
+                return None
+            record = AuthCodeRecord(
+                client_id=row["client_id"],
+                redirect_uri=row["redirect_uri"],
+                scope=row["scope"],
+                code_challenge=row["code_challenge"],
+                code_challenge_method=row["code_challenge_method"],
+                resource=row["resource"] or "",
+                subject=row["subject"],
+                created_at=row["created_at"],
+                expires_at=row["expires_at"],
+                redeemed_at=now,
+            )
+            if validate is not None:
+                validate(record)
             cursor = conn.execute(
                 """UPDATE oauth_codes SET redeemed_at = ?
                    WHERE code_hash = ? AND redeemed_at IS NULL AND expires_at > ?""",
@@ -771,28 +796,7 @@ class AuthorizationCodeStore:
             )
             if cursor.rowcount != 1:
                 return None
-            row = conn.execute(
-                "SELECT * FROM oauth_codes WHERE code_hash = ?",
-                (code_hash,),
-            ).fetchone()
-        if (
-            row is None
-            or row["client_id"] != client_id
-            or row["redirect_uri"] != redirect_uri
-        ):
-            return None
-        return AuthCodeRecord(
-            client_id=row["client_id"],
-            redirect_uri=row["redirect_uri"],
-            scope=row["scope"],
-            code_challenge=row["code_challenge"],
-            code_challenge_method=row["code_challenge_method"],
-            resource=row["resource"] or "",
-            subject=row["subject"],
-            created_at=row["created_at"],
-            expires_at=row["expires_at"],
-            redeemed_at=row["redeemed_at"],
-        )
+            return record
 
     def purge_expired(self, *, now: float | None = None) -> int:
         cutoff = time.time() if now is None else now

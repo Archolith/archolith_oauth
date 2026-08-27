@@ -288,6 +288,7 @@ class RefreshTokenStore:
         resource: str,
         scope: str | None = None,
         allowed_scopes: Collection[str] | None = None,
+        required_scopes: Collection[str] | None = None,
         now: float | None = None,
     ) -> tuple[RefreshTokenRecord, str] | None:
         """Atomically rotate a token, optionally narrowing the family scope.
@@ -345,6 +346,10 @@ class RefreshTokenStore:
             ):
                 raise RefreshScopeError(
                     "continued scope is no longer supported by the authorization server"
+                )
+            if required_scopes is not None and continued_scopes != set(required_scopes):
+                raise RefreshScopeError(
+                    "continued scope does not match current client scope policy"
                 )
 
             cursor = conn.execute(
@@ -447,6 +452,7 @@ class RefreshTokenStore:
         sign_response: Callable[[RefreshTokenRecord, str], dict[str, Any]],
         scope: str | None = None,
         allowed_scopes: Collection[str] | None = None,
+        required_scopes: Collection[str] | None = None,
         now: float | None = None,
     ) -> DurableRotationResult | None:
         """Rotate a refresh token and persist a durable retry receipt.
@@ -481,6 +487,19 @@ class RefreshTokenStore:
         with _connect(self.db_path) as conn:
             conn.row_factory = sqlite3.Row
             conn.execute("BEGIN IMMEDIATE")
+
+            # Validate immutable per-client scope policy before any cleanup,
+            # replay, revocation, rotation, successor, or receipt mutation.
+            policy_row = conn.execute(
+                "SELECT scope FROM oauth_refresh_tokens WHERE token_hash = ?",
+                (token_hash,),
+            ).fetchone()
+            if policy_row is not None:
+                policy_scopes = set(str(policy_row["scope"]).split())
+                if required_scopes is not None and policy_scopes != set(required_scopes):
+                    raise RefreshScopeError(
+                        "continued scope does not match current client scope policy"
+                    )
 
             conn.execute(
                 "DELETE FROM oauth_refresh_receipts WHERE expires_at <= ?",
@@ -546,6 +565,10 @@ class RefreshTokenStore:
             ):
                 raise RefreshScopeError(
                     "continued scope is no longer supported by the authorization server"
+                )
+            if required_scopes is not None and continued_scopes != set(required_scopes):
+                raise RefreshScopeError(
+                    "continued scope does not match current client scope policy"
                 )
 
             # Once a successor is itself presented, its predecessor's exact-retry

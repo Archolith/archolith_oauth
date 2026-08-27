@@ -113,3 +113,30 @@ def test_current_scope_policy_is_checked_before_rotation(tmp_path: Path):
         "offline_access",
     }
     assert replacement
+
+
+def test_exact_client_scope_policy_is_checked_before_rotation(tmp_path: Path):
+    store = RefreshTokenStore(tmp_path / "oauth.db", ttl_s=3600)
+    token = store.issue(
+        client_id="chatgpt",
+        subject="owner",
+        scope="menhir:read menhir:write",
+        resource="https://memory.example.com/mcp-http",
+    )
+
+    with pytest.raises(ValueError, match="current client scope policy"):
+        store.rotate(
+            token=token,
+            client_id="chatgpt",
+            resource="https://memory.example.com/mcp-http",
+            required_scopes={"menhir:read"},
+        )
+
+    record, replacement = store.rotate(
+        token=token,
+        client_id="chatgpt",
+        resource="https://memory.example.com/mcp-http",
+        required_scopes={"menhir:read", "menhir:write"},
+    )
+    assert set(record.scope.split()) == {"menhir:read", "menhir:write"}
+    assert replacement

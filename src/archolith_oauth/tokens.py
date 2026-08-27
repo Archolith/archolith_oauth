@@ -9,7 +9,7 @@ from typing import Any
 
 from . import jose
 from .config import AuthorizationServerConfig
-from .models import OAuthClient, RefreshTokenRecord
+from .models import AuthCodeRecord, OAuthClient, RefreshTokenRecord
 from .pkce import verify_s256
 from .refresh_tokens import RefreshScopeError, RefreshTokenStore
 from .stores import (
@@ -48,6 +48,21 @@ class TokenResponse:
         return payload
 
 
+def _validate_tier(tier: str | None) -> None:
+    if tier is None:
+        return
+    if (
+        not isinstance(tier, str)
+        or not tier
+        or tier != tier.strip()
+        or not tier.isprintable()
+        or any(character.isspace() for character in tier)
+    ):
+        raise ValueError(
+            "tier must be a non-empty printable string without whitespace"
+        )
+
+
 class TokenIssuer:
     def __init__(self, config: AuthorizationServerConfig, signing_key) -> None:
         if "RS256" not in config.allowed_algorithms:
@@ -63,7 +78,9 @@ class TokenIssuer:
         scope: str,
         resource: str = "",
         refresh_token: str | None = None,
+        tier: str | None = None,
     ) -> TokenResponse:
+        _validate_tier(tier)
         target_resource = resource or self.config.resource
         if target_resource != self.config.resource:
             raise ValueError("token resource does not match authorization server")
@@ -81,6 +98,8 @@ class TokenIssuer:
             "iat": now,
             "exp": now + ttl,
         }
+        if tier is not None:
+            claims["tier"] = tier
         return TokenResponse(
             access_token=jose.sign_jwt(header, claims, self.signing_key),
             token_type="Bearer",
@@ -102,7 +121,9 @@ def exchange_authorization_code(
     resource: str,
     refresh_store: RefreshTokenStore | None = None,
     allowed_scopes: Collection[str] | None = None,
+    required_scopes: Collection[str] | None = None,
     issue_refresh_without_offline_access: bool = False,
+    tier: str | None = None,
 ) -> TokenResponse:
     """Redeem one authorization code using PKCE and RFC 8707 resource binding.
 
@@ -111,39 +132,54 @@ def exchange_authorization_code(
     scope. It remains off by default and never adds ``offline_access`` to the
     granted permission scope.
     """
+    _validate_tier(tier)
     if not resource:
         raise TokenExchangeError("invalid_request", "resource is required")
+    client = client_store.get(client_id)
+    if client is None:
+        raise TokenExchangeError("invalid_grant", "registered client no longer exists")
+
+    def validate_record(record: AuthCodeRecord) -> None:
+        if resource != record.resource or resource != issuer.config.resource:
+            raise TokenExchangeError(
+                "invalid_grant",
+                "resource does not match the authorization request",
+            )
+        if record.code_challenge_method != "S256" or not verify_s256(
+            code_verifier,
+            record.code_challenge,
+        ):
+            raise TokenExchangeError("invalid_grant", "PKCE verification failed")
+        scope_set = set(record.scope.split())
+        if not scope_set:
+            raise TokenExchangeError(
+                "invalid_grant",
+                "authorization grant contains no scope",
+            )
+        if allowed_scopes is not None and not scope_set.issubset(set(allowed_scopes)):
+            raise TokenExchangeError(
+                "invalid_grant",
+                "authorization grant contains scope no longer supported",
+            )
+        if required_scopes is not None and scope_set != set(required_scopes):
+            raise TokenExchangeError(
+                "invalid_grant",
+                "authorization grant does not match current client scope policy",
+            )
+
     record = code_store.redeem(
         code=code,
         client_id=client_id,
         redirect_uri=redirect_uri,
+        validate=validate_record,
     )
     if record is None:
         raise TokenExchangeError(
             "invalid_grant",
             "authorization code is invalid, expired, or already used",
         )
-    if resource != record.resource or resource != issuer.config.resource:
-        raise TokenExchangeError(
-            "invalid_grant",
-            "resource does not match the authorization request",
-        )
-    if record.code_challenge_method != "S256" or not verify_s256(
-        code_verifier,
-        record.code_challenge,
-    ):
-        raise TokenExchangeError("invalid_grant", "PKCE verification failed")
-    client = client_store.get(client_id)
-    if client is None:
-        raise TokenExchangeError("invalid_grant", "registered client no longer exists")
-
     refresh_token: str | None = None
     scope_set = set(record.scope.split())
-    if allowed_scopes is not None and not scope_set.issubset(set(allowed_scopes)):
-        raise TokenExchangeError(
-            "invalid_grant",
-            "authorization grant contains scope no longer supported",
-        )
     if (
         issuer.config.issue_refresh_tokens
         and (
@@ -169,6 +205,7 @@ def exchange_authorization_code(
         scope=record.scope,
         resource=resource,
         refresh_token=refresh_token,
+        tier=tier,
     )
     client_store.mark_exchanged(client_id)
     return response
@@ -184,6 +221,8 @@ def exchange_refresh_token(
     resource: str,
     scope: str | None = None,
     allowed_scopes: Collection[str] | None = None,
+    required_scopes: Collection[str] | None = None,
+    tier: str | None = None,
 ) -> TokenResponse:
     """Rotate a public client's refresh token and mint a new access token.
 
@@ -193,6 +232,7 @@ def exchange_refresh_token(
     with ``invalid_scope`` before any mutation, leaving the presented token
     usable.
     """
+    _validate_tier(tier)
     if not issuer.config.issue_refresh_tokens:
         raise TokenExchangeError(
             "unsupported_grant_type",
@@ -216,6 +256,7 @@ def exchange_refresh_token(
             resource=resource,
             scope=scope,
             allowed_scopes=allowed_scopes,
+            required_scopes=required_scopes,
         )
     except RefreshScopeError as exc:
         raise TokenExchangeError("invalid_scope", exc.description) from exc
@@ -238,6 +279,7 @@ def exchange_refresh_token(
         scope=issued_scope,
         resource=record.resource,
         refresh_token=replacement,
+        tier=tier,
     )
 
 
@@ -252,6 +294,8 @@ def exchange_refresh_token_durable(
     resource: str,
     scope: str | None = None,
     allowed_scopes: Collection[str] | None = None,
+    required_scopes: Collection[str] | None = None,
+    tier: str | None = None,
 ) -> TokenResponse:
     """Rotate a refresh token and persist a durable exact-response receipt.
 
@@ -262,6 +306,7 @@ def exchange_refresh_token_durable(
     rather than revoking the family; a variant or post-grace retry fails with
     ``invalid_grant`` and revokes the family.
     """
+    _validate_tier(tier)
     if not issuer.config.issue_refresh_tokens:
         raise TokenExchangeError(
             "unsupported_grant_type",
@@ -290,6 +335,7 @@ def exchange_refresh_token_durable(
             scope=issued_scope,
             resource=record.resource,
             refresh_token=replacement,
+            tier=tier,
         ).as_dict()
 
     try:
@@ -299,6 +345,7 @@ def exchange_refresh_token_durable(
             resource=resource,
             scope=scope,
             allowed_scopes=allowed_scopes,
+            required_scopes=required_scopes,
             keyring=keyring,
             sign_response=sign_response,
         )
