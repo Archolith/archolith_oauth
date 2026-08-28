@@ -11,10 +11,12 @@ Reusable OAuth 2.1 building blocks extracted from Menhir for Archolith services 
 - Menhir-compatible SQLite client and single-use authorization-code stores
 - Persistent RS256 signing keys with minimal active/previous-key rotation
 - Access-token issuance and JWT/JWKS verification
-- Opt-in `offline_access` with rotating, replay-detecting refresh tokens
+- Opt-in `offline_access` with rotating, replay-detecting refresh tokens and
+  encrypted durable exact-retry receipts for lost responses
 - Prefixed environment settings, redacted diagnostics, and deployment preflight
 - One-call construction with `OAuthRuntime.from_settings()`
-- Signed, single-use consent-state primitives without prescribing a UI
+- Signed consent-state primitives plus durable, atomic single-use consent
+  registration and authorization-code issuance without prescribing a UI
 - Declarative scope policy for routes and MCP tool catalog filtering
 - Optional FastAPI routes and ASGI bearer middleware
 - Node.js resource-server example using `jose`

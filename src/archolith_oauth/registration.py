@@ -38,6 +38,11 @@ def _valid_redirect_uri(uri: str) -> bool:
     return host in {"localhost", "127.0.0.1", "::1"}
 
 
+def valid_redirect_uri(uri: str) -> bool:
+    """Return whether a public-client redirect URI satisfies the shared policy."""
+    return _valid_redirect_uri(uri)
+
+
 def register_public_client(
     metadata: dict,
     *,

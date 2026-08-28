@@ -133,6 +133,8 @@ class AuthorizationServerConfig:
     refresh_token_ttl_s: int = 30 * 24 * 60 * 60
     offline_access_scope: str = "offline_access"
     allowed_algorithms: tuple[str, ...] = ("RS256",)
+    authorization_response_iss_parameter_supported: bool = False
+    client_id_metadata_document_supported: bool = False
 
     def __post_init__(self) -> None:
         issuer = _validate_url(self.issuer, "issuer")
