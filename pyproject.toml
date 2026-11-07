@@ -9,7 +9,7 @@ description = "Reusable OAuth 2.1 building blocks for Archolith services and rem
 readme = "README.md"
 license = "Apache-2.0"
 requires-python = ">=3.11"
-authors = [{ name = "Charles Harvey" }]
+authors = [{ name = "ctharvey" }]
 dependencies = [
   "cryptography>=50.0.1,<51",
   "httpx>=0.27,<1",
@@ -39,7 +39,7 @@ dev = [
 ]
 
 [project.urls]
-Repository = "https://github.com/ctharvey/archolith_oauth"
+Repository = "https://github.com/Archolith/archolith_oauth"
 
 [tool.setuptools.packages.find]
 where = ["src"]
